@@ -1,39 +1,30 @@
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 import numpy as np
-from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input, decode_predictions
-from tensorflow.keras.preprocessing.image import img_to_array
 
-# Modelo pre-entrenado para reconocer objetos
-@st.cache_resource
-def load_model():
-    return MobileNetV2(weights="imagenet")
+# Intentamos cargar OpenCV
+try:
+    import cv2
+except ModuleNotFoundError:
+    st.error("Falta OpenCV. Agrega 'opencv-python-headless' a requirements.txt y vuelve a desplegar.")
+    st.stop()
 
-model = load_model()
+st.title("Tablero para dibujo + reconocimiento de figuras (casa, corazón, estrella)")
 
-st.title("Tablero para dibujo con reconocimiento IA")
-
+# ------------------ UI ------------------
 with st.sidebar:
     st.subheader("Propiedades del Tablero")
-
-    # Canvas dimensions
     st.subheader("Dimensiones del Tablero")
     canvas_width = st.slider("Ancho del tablero", 300, 700, 500, 50)
     canvas_height = st.slider("Alto del tablero", 200, 600, 300, 50)
 
-    # Drawing mode selector
     drawing_mode = st.selectbox(
         "Herramienta de Dibujo:",
         ("freedraw", "line", "rect", "circle", "transform", "polygon", "point"),
     )
 
-    # Stroke width slider
     stroke_width = st.slider("Selecciona el ancho de línea", 1, 30, 15)
-
-    # Stroke color picker
     stroke_color = st.color_picker("Color de trazo", "#FFFFFF")
-
-    # Background color
     bg_color = st.color_picker("Color de fondo", "#000000")
 
 # Canvas
@@ -48,19 +39,67 @@ canvas_result = st_canvas(
     key=f"canvas_{canvas_width}_{canvas_height}",
 )
 
-# --- Procesar lo dibujado y hacer predicción ---
-if canvas_result.image_data is not None:
-    img = canvas_result.image_data.astype(np.uint8)
+# ------------------ Plantillas "semánticas" ------------------
 
-    # Preprocesar para el modelo
-    img_resized = np.array(st.image(img, caption="Tu dibujo", use_container_width=True))
-    img_resized = np.array(img)
-    img_resized = np.expand_dims(img_resized, axis=0)
-    img_resized = preprocess_input(img_resized)
+def template_heart(size=256):
+    """Genera máscara binaria de un corazón centrado."""
+    img = np.zeros((size, size), dtype=np.uint8)
+    # Ecuación paramétrica del corazón
+    t = np.linspace(0, 2*np.pi, 800)
+    x = 16 * (np.sin(t) ** 3)
+    y = 13*np.cos(t) - 5*np.cos(2*t) - 2*np.cos(3*t) - np.cos(4*t)
+    x = (x - x.min()) / (x.max() - x.min())
+    y = (y - y.min()) / (y.max() - y.min())
+    pts = np.stack([x*(size*0.7)+size*0.15, (1-y)*(size*0.7)+size*0.15], axis=1).astype(np.int32)
+    cv2.fillPoly(img, [pts], 255)
+    return img
 
-    # Predicción
-    preds = model.predict(img_resized)
-    decoded = decode_predictions(preds, top=1)[0]
+def template_house(size=256):
+    """Genera máscara binaria de una casa (cuerpo + techo)."""
+    img = np.zeros((size, size), dtype=np.uint8)
+    # Cuerpo (rectángulo)
+    body = np.array([
+        [int(size*0.25), int(size*0.55)],
+        [int(size*0.75), int(size*0.55)],
+        [int(size*0.75), int(size*0.85)],
+        [int(size*0.25), int(size*0.85)],
+    ], dtype=np.int32)
+    # Techo (triángulo)
+    roof = np.array([
+        [int(size*0.20), int(size*0.55)],
+        [int(size*0.80), int(size*0.55)],
+        [int(size*0.50), int(size*0.20)],
+    ], dtype=np.int32)
+    cv2.fillPoly(img, [body], 255)
+    cv2.fillPoly(img, [roof], 255)
+    return img
 
-    st.subheader("Lo que dibujaste podría ser:")
-    st.write(f"👉 {decoded[0][1]} (con {decoded[0][2]*100:.2f}% de confianza)")
+def template_star(size=256, points=5, inner_ratio=0.45):
+    """Genera máscara binaria de una estrella regular."""
+    img = np.zeros((size, size), dtype=np.uint8)
+    cx, cy = size//2, size//2
+    R = int(size*0.38)
+    r = int(R*inner_ratio)
+    angles = np.linspace(0, 2*np.pi, points*2, endpoint=False) - np.pi/2
+    pts = []
+    for i, ang in enumerate(angles):
+        rad = R if i % 2 == 0 else r
+        x = int(cx + rad*np.cos(ang))
+        y = int(cy + rad*np.sin(ang))
+        pts.append([x, y])
+    pts = np.array(pts, dtype=np.int32)
+    cv2.fillPoly(img, [pts], 255)
+    return img
+
+@st.cache_resource
+def build_templates():
+    """Devuelve contornos normalizados de las plantillas."""
+    templates = {
+        "corazón": template_heart(),
+        "casa": template_house(),
+        "estrella": template_star(),
+    }
+    contours = {}
+    for name, mask in templates.items():
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
